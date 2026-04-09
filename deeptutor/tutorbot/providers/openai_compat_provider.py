@@ -15,6 +15,7 @@ from collections.abc import Awaitable, Callable
 from typing import TYPE_CHECKING, Any
 
 import json_repair
+from loguru import logger
 from openai import AsyncOpenAI
 
 from deeptutor.tutorbot.providers.base import LLMProvider, LLMResponse, ToolCallRequest
@@ -496,7 +497,9 @@ class OpenAICompatProvider(LLMProvider):
         try:
             return self._parse(await self._client.chat.completions.create(**kwargs))
         except Exception as e:
+            logger.warning("_is_tool_format_error check: type={}, body={}, msg={}", type(e).__name__, getattr(e, 'body', None), str(e)[:200])
             if tools and self._is_tool_format_error(e):
+                logger.info("Falling back to streaming for tool-call format error")
                 return await self.chat_stream(
                     messages, tools, model, max_tokens, temperature,
                     reasoning_effort, tool_choice,

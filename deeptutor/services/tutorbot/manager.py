@@ -41,6 +41,8 @@ class BotConfig:
     persona: str = ""
     channels: dict[str, Any] = field(default_factory=dict)
     model: str | None = None
+    api_key: str | None = None
+    api_base: str | None = None
 
 
 @dataclass
@@ -191,13 +193,16 @@ class TutorBotManager:
             return None
         try:
             data = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
-            return BotConfig(
+            cfg = BotConfig(
                 name=data.get("name", bot_id),
                 description=data.get("description", ""),
                 persona=data.get("persona", ""),
                 channels=data.get("channels", {}),
                 model=data.get("model"),
+                api_key=data.get("api_key"),
+                api_base=data.get("api_base"),
             )
+            return cfg
         except Exception:
             logger.exception("Failed to load bot config %s", bot_id)
             return None
@@ -215,6 +220,10 @@ class TutorBotManager:
         }
         if config.model:
             data["model"] = config.model
+        if config.api_key:
+            data["api_key"] = config.api_key
+        if config.api_base:
+            data["api_base"] = config.api_base
         path.write_text(yaml.dump(data, allow_unicode=True), encoding="utf-8")
 
     # ── Bot lifecycle ─────────────────────────────────────────────
@@ -239,6 +248,28 @@ class TutorBotManager:
         from deeptutor.tutorbot.session.manager import SessionManager
 
         provider = create_deeptutor_provider()
+
+        # Override provider endpoint if bot config specifies custom api_base/api_key
+        if config.api_base and config.api_base.strip():
+            from deeptutor.services.provider_registry import find_by_model
+            spec = find_by_model(config.model or provider.default_model)
+            backend = spec.backend if spec else "openai_compat"
+            if backend == "anthropic":
+                from deeptutor.tutorbot.providers.anthropic_provider import AnthropicProvider
+                provider = AnthropicProvider(
+                    api_key=config.api_key or provider.api_key,
+                    api_base=config.api_base,
+                    default_model=config.model or provider.default_model,
+                )
+            else:
+                from deeptutor.tutorbot.providers.openai_compat_provider import OpenAICompatProvider
+                provider = OpenAICompatProvider(
+                    api_key=config.api_key or provider.api_key,
+                    api_base=config.api_base,
+                    default_model=config.model or provider.default_model,
+                    spec=spec,
+                )
+            logger.info("TutorBot '%s' using custom endpoint: %s", bot_id, config.api_base)
         bus = MessageBus()
 
         workspace = self._bot_workspace(bot_id)
@@ -335,7 +366,9 @@ class TutorBotManager:
         await heartbeat.start()
 
         self._bots[bot_id] = instance
-        self._save_bot_config(bot_id, config)
+        # Re-read config from disk to preserve manual edits (api_key, api_base, etc.)
+        disk_cfg = self._load_bot_config(bot_id)
+        self._save_bot_config(bot_id, disk_cfg or config)
         logger.info("TutorBot '%s' started (workspace=%s)", bot_id, workspace)
         return instance
 
@@ -419,7 +452,9 @@ class TutorBotManager:
             except Exception:
                 pass
 
-        self._save_bot_config(bot_id, instance.config, auto_start=False)
+        # Re-read config from disk to preserve manual edits (api_key, api_base, etc.)
+        disk_cfg = self._load_bot_config(bot_id)
+        self._save_bot_config(bot_id, disk_cfg or instance.config, auto_start=False)
         del self._bots[bot_id]
         logger.info("TutorBot '%s' stopped", bot_id)
         return True
@@ -606,6 +641,8 @@ class TutorBotManager:
                     persona=data.get("persona", ""),
                     channels=data.get("channels", {}),
                     model=data.get("model"),
+                    api_key=data.get("api_key"),
+                    api_base=data.get("api_base"),
                 )
                 await self.start_bot(bid, config)
                 logger.info("Auto-started bot '%s'", bid)
